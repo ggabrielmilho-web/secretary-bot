@@ -1,0 +1,11 @@
+openai-agents>=0.1.0
+python-telegram-bot[job-queue]>=21.0
+google-api-python-client>=2.100.0
+google-auth>=2.20.0
+sqlalchemy[asyncio]>=2.0
+alembic
+asyncpg
+psycopg2-binary
+python-dotenv
+pydantic>=2.0
+pytz
