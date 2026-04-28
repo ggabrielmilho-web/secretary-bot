@@ -14,15 +14,12 @@ from bot.database import crud
 
 logger = logging.getLogger(__name__)
 
-_agent = None
 _memory = ConversationMemory()
 
 
 def get_agent():
-    global _agent
-    if _agent is None:
-        _agent = build_secretary_agent()
-    return _agent
+    # Reconstrói o agente a cada chamada para garantir data/hora sempre atualizada nas instruções
+    return build_secretary_agent()
 
 
 async def _run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str) -> None:

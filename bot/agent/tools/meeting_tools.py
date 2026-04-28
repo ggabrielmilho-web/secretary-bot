@@ -28,6 +28,7 @@ class CriarReuniaoInput(BaseModel):
     participants: Optional[str] = Field(default=None, description="Participantes separados por vírgula")
     description: Optional[str] = Field(default=None, description="Descrição ou pauta (opcional)")
     force: Optional[bool] = Field(default=False, description="True para criar mesmo com conflito de horário confirmado pelo diretor")
+    create_meet_link: Optional[bool] = Field(default=False, description="True APENAS quando o diretor pedir explicitamente link do Google Meet, videoconferência ou 'via meeting'")
 
 
 class ListarAgendaInput(BaseModel):
@@ -124,6 +125,7 @@ async def criar_reuniao(ctx: RunContextWrapper[dict], input: CriarReuniaoInput) 
             location=input.location,
             description=gcal_description or None,
             attendees=gcal_attendees,
+            create_meet_link=input.create_meet_link or False,
         )
         gcal_status = "sincronizado" if gcal_result else "falha_sincronizacao"
         if not gcal_result:

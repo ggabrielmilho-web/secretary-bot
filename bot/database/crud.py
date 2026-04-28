@@ -446,7 +446,7 @@ async def list_reminders(user_id: int, active_only: bool = True) -> list[Reminde
 
 async def list_pending_reminders() -> list[Reminder]:
     async with async_session() as session:
-        now = datetime.utcnow()
+        now = datetime.now()
         result = await session.execute(
             select(Reminder).where(
                 and_(

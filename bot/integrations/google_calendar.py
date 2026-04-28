@@ -103,6 +103,7 @@ class GoogleCalendarClient:
         location: Optional[str],
         description: Optional[str],
         attendees: Optional[list[str]],
+        create_meet_link: bool = False,
     ) -> dict:
         service = self._get_service(user_email)
         end_dt = datetime_start + timedelta(minutes=duration_minutes)
@@ -118,18 +119,20 @@ class GoogleCalendarClient:
         if attendees:
             body["attendees"] = [{"email": e} for e in attendees]
 
-        # Gera link do Google Meet automaticamente
-        body["conferenceData"] = {
-            "createRequest": {
-                "requestId": uuid.uuid4().hex,
-                "conferenceSolutionKey": {"type": "hangoutsMeet"},
+        conference_version = 0
+        if create_meet_link:
+            body["conferenceData"] = {
+                "createRequest": {
+                    "requestId": uuid.uuid4().hex,
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
             }
-        }
+            conference_version = 1
 
         event = service.events().insert(
             calendarId="primary",
             body=body,
-            conferenceDataVersion=1,
+            conferenceDataVersion=conference_version,
         ).execute()
         meet_link = event.get("hangoutLink", "")
         logger.info(f"Evento criado no Google Calendar: {event['id']} — {title} | Meet: {meet_link}")
@@ -192,6 +195,7 @@ class GoogleCalendarClient:
         location: Optional[str] = None,
         description: Optional[str] = None,
         attendees: Optional[list[str]] = None,
+        create_meet_link: bool = False,
     ) -> Optional[dict]:
         if not self.available:
             return None
@@ -207,6 +211,7 @@ class GoogleCalendarClient:
                 location,
                 description,
                 attendees,
+                create_meet_link,
             )
         except Exception as e:
             logger.error(f"[GCAL] Falha ao criar evento para {user_email}: {type(e).__name__}: {e}")
