@@ -67,7 +67,7 @@ async def criar_lembrete(ctx: RunContextWrapper[dict], input: CriarLembreteInput
     except ValueError:
         return json.dumps({"error": f"Formato de data inválido: {input.remind_at}"}, ensure_ascii=False)
 
-    if remind_at < datetime.now():
+    if remind_at < datetime.now(TZ_SP).replace(tzinfo=None):
         return json.dumps(
             {"error": "Horário do lembrete está no passado. Confirme o horário com o diretor."},
             ensure_ascii=False,
@@ -201,7 +201,7 @@ async def resumo_do_dia(ctx: RunContextWrapper[dict], input: ResumoDoDiaInput) -
     Consulta o Google Calendar para reuniões quando disponível.
     """
     user_id: int = ctx.context.get("user_id")
-    user_email: Optional[str] = ctx.context.get("user_email")
+    db_user = ctx.context.get("db_user")
 
     if input.date:
         try:
@@ -245,11 +245,11 @@ async def resumo_do_dia(ctx: RunContextWrapper[dict], input: ResumoDoDiaInput) -
     events_data = []
     events_source = "banco_local"
 
-    if user_email and _gcal_module.google_calendar and _gcal_module.google_calendar.available:
-        gcal_events = await _gcal_module.google_calendar.list_events(user_email, start, end)
+    if db_user and _gcal_module.user_has_calendar(db_user):
+        gcal_events = await _gcal_module.list_events(db_user, start, end)
         if gcal_events is not None:
             events_data = gcal_events
-            events_source = "_gcal_module.google_calendar"
+            events_source = "google_calendar"
 
     if not events_data:
         try:

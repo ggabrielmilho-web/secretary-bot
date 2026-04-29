@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes
 
 from bot.config import settings
 from bot.database import crud
-import bot.integrations.google_calendar as _gcal_module
+import bot.integrations.google_calendar as _gcal
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +24,11 @@ def _next_occurrence(remind_at: datetime, recurrence_rule: str) -> datetime | No
 
     if rule == "weekdays":
         next_dt = remind_at + timedelta(days=1)
-        while next_dt.weekday() >= 5:  # sábado=5, domingo=6
+        while next_dt.weekday() >= 5:
             next_dt += timedelta(days=1)
         return next_dt
 
     if rule.startswith("weekly:"):
-        # Ex: weekly:mon,wed,fri
         day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
         days_str = rule.replace("weekly:", "").split(",")
         target_days = sorted({day_map[d.strip()] for d in days_str if d.strip() in day_map})
@@ -39,12 +38,10 @@ def _next_occurrence(remind_at: datetime, recurrence_rule: str) -> datetime | No
         for day in target_days:
             if day > current_weekday:
                 return remind_at + timedelta(days=(day - current_weekday))
-        # Volta para o primeiro da semana seguinte
         days_until = (7 - current_weekday) + target_days[0]
         return remind_at + timedelta(days=days_until)
 
     if rule.startswith("monthly:"):
-        # Ex: monthly:15
         try:
             target_day = int(rule.replace("monthly:", ""))
             next_month = remind_at.replace(day=1) + timedelta(days=32)
@@ -65,7 +62,6 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     for reminder in pending:
         try:
-            # Busca telegram_id do usuário
             from bot.database.models import User
             from bot.database.connection import async_session
             from sqlalchemy import select
@@ -74,7 +70,7 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
                 result = await session.execute(select(User).where(User.id == reminder.user_id))
                 user = result.scalar_one_or_none()
 
-            if not user:
+            if not user or not user.is_active:
                 continue
 
             await context.bot.send_message(
@@ -85,20 +81,22 @@ async def check_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             await crud.mark_reminder_sent(reminder.id)
             logger.info(f"Lembrete {reminder.id} enviado para usuário {user.telegram_id}")
 
-            # Cria próxima ocorrência se recorrente
             if reminder.is_recurring and reminder.recurrence_rule:
                 next_dt = _next_occurrence(reminder.remind_at, reminder.recurrence_rule)
                 if next_dt:
-                    await crud.create_reminder(
-                        user_id=reminder.user_id,
-                        message=reminder.message,
-                        remind_at=next_dt,
-                        is_recurring=True,
-                        recurrence_rule=reminder.recurrence_rule,
-                        task_id=reminder.task_id,
-                        meeting_id=reminder.meeting_id,
-                        reminder_type=reminder.reminder_type,
-                    )
+                    try:
+                        await crud.create_reminder(
+                            user_id=reminder.user_id,
+                            message=reminder.message,
+                            remind_at=next_dt,
+                            is_recurring=True,
+                            recurrence_rule=reminder.recurrence_rule,
+                            task_id=reminder.task_id,
+                            meeting_id=reminder.meeting_id,
+                            reminder_type=reminder.reminder_type,
+                        )
+                    except Exception:
+                        pass  # duplicata possível, ignorar
 
         except Exception as e:
             logger.error(f"Erro ao processar lembrete {reminder.id}: {e}")
@@ -118,12 +116,11 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     for user in users:
         try:
-            user_email = settings.USER_EMAIL_MAP.get(user.telegram_id)
-
-            # Reuniões — Google Calendar como fonte principal
             events_data = []
-            if user_email and _gcal_module.google_calendar and _gcal_module.google_calendar.available:
-                events_data = await _gcal_module.google_calendar.list_events(user_email, start, end) or []
+
+            # Google Calendar como fonte principal (usa tokens individuais do usuário)
+            if _gcal.user_has_calendar(user):
+                events_data = await _gcal.list_events(user, start, end) or []
 
             if not events_data:
                 meetings = await crud.list_meetings(user_id=user.id, date_from=start, date_to=end)
@@ -137,16 +134,13 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
                     for m in meetings
                 ]
 
-            # Tarefas pendentes — separar atrasadas das normais
             tasks = await crud.list_tasks(user_id=user.id, status="pendente")
             now_dt = now.replace(tzinfo=None)
             tasks_atrasadas = [t for t in tasks if t.due_date and t.due_date < now_dt]
             tasks_normais = [t for t in tasks if not (t.due_date and t.due_date < now_dt)]
 
-            # Lembretes do dia
             reminders = await crud.list_reminders_for_day(user_id=user.id, date=now.replace(tzinfo=None))
 
-            # Monta mensagem
             msg = f"☀️ Bom dia! Aqui está seu resumo de hoje ({now.strftime('%d/%m/%Y')}):\n\n"
 
             if tasks_atrasadas:
@@ -195,6 +189,64 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
 
         except Exception as e:
             logger.error(f"Erro ao enviar resumo diário para usuário {user.telegram_id}: {e}")
+
+
+async def check_subscriptions(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Verifica assinaturas vencidas e notifica usuários. Roda às 6:00."""
+    try:
+        # Trials expirados
+        expired_trials = await crud.get_expired_trials()
+        for user in expired_trials:
+            try:
+                await crud.deactivate_user(user.id)
+                await context.bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=(
+                        "⏰ *Seu período de teste expirou!*\n\n"
+                        "Para continuar usando o Secretário IA, escolha um plano:\n"
+                        "Use /planos para assinar."
+                    ),
+                    parse_mode="Markdown",
+                )
+                logger.info(f"Trial expirado — usuário {user.telegram_id} desativado.")
+            except Exception as e:
+                logger.error(f"Erro ao processar trial expirado do usuário {user.telegram_id}: {e}")
+
+        # Assinaturas pagas expiradas
+        expired_subs = await crud.get_expired_subscriptions()
+        for user in expired_subs:
+            try:
+                await crud.deactivate_user(user.id)
+                await context.bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=(
+                        "⏰ *Sua assinatura expirou!*\n\n"
+                        "Use /renovar para continuar usando o Secretário IA."
+                    ),
+                    parse_mode="Markdown",
+                )
+                logger.info(f"Assinatura expirada — usuário {user.telegram_id} desativado.")
+            except Exception as e:
+                logger.error(f"Erro ao processar assinatura expirada do usuário {user.telegram_id}: {e}")
+
+        # Assinaturas prestes a vencer (3 dias antes)
+        expiring_soon = await crud.get_expiring_soon(days=3)
+        for user in expiring_soon:
+            try:
+                vencimento = user.subscription_ends_at.strftime("%d/%m/%Y") if user.subscription_ends_at else "em breve"
+                await context.bot.send_message(
+                    chat_id=user.telegram_id,
+                    text=(
+                        f"⚠️ Sua assinatura vence em *{vencimento}*.\n\n"
+                        "Use /renovar para não perder o acesso."
+                    ),
+                    parse_mode="Markdown",
+                )
+            except Exception as e:
+                logger.error(f"Erro ao notificar vencimento próximo do usuário {user.telegram_id}: {e}")
+
+    except Exception as e:
+        logger.error(f"Erro geral no job check_subscriptions: {e}")
 
 
 async def cleanup_old_messages(context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -3,11 +3,11 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select, update, delete, and_
+from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.database.connection import async_session
-from bot.database.models import ConversationMessage, Meeting, Reminder, Task, User
+from bot.database.models import ConversationMessage, Coupon, Meeting, Payment, Reminder, Task, User
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +34,82 @@ class DuplicateReminderError(Exception):
 
 
 # ---------------------------------------------------------------------------
+# Subscription
+# ---------------------------------------------------------------------------
+
+def check_subscription_status(user: Optional[User]) -> tuple[bool, str]:
+    """Verifica se o usuário tem assinatura ativa. Função pura, sem acesso ao banco."""
+    if not user:
+        return False, "Use /start para criar sua conta."
+    if not user.is_active:
+        return False, "Sua conta está desativada. Entre em contato com o suporte."
+    if user.plan == "lifetime":
+        return True, ""
+    if user.plan == "trial":
+        if user.trial_ends_at and user.trial_ends_at > datetime.now():
+            dias = (user.trial_ends_at - datetime.now()).days + 1
+            return True, f"Trial ativo ({dias} dia(s) restante(s))"
+        return False, (
+            "⏰ Seu período de teste expirou!\n\n"
+            "Para continuar usando, assine agora:\n"
+            "Use /planos para ver as opções."
+        )
+    # monthly
+    if user.subscription_ends_at and user.subscription_ends_at > datetime.now():
+        return True, ""
+    return False, (
+        "⏰ Sua assinatura expirou!\n\n"
+        "Use /renovar para continuar usando."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Users
 # ---------------------------------------------------------------------------
 
-async def get_or_create_user(telegram_id: int, name: str) -> User:
+async def get_user_by_telegram_id(telegram_id: int) -> Optional[User]:
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def create_user(telegram_id: int, name: str, trial_days: int = 7) -> User:
+    async with async_session() as session:
+        user = User(
+            telegram_id=telegram_id,
+            name=name,
+            plan="trial",
+            trial_ends_at=datetime.now() + timedelta(days=trial_days),
+            is_active=True,
+        )
+        session.add(user)
+        await session.flush()
+        await session.refresh(user)
+        logger.info(f"Novo usuário criado: {telegram_id} ({name}) — trial até {user.trial_ends_at}")
+        return user
+
+
+async def get_or_create_user(telegram_id: int, name: str, trial_days: int = 7) -> User:
+    """Busca ou cria usuário. Usado internamente pelo agente."""
     async with async_session() as session:
         result = await session.execute(
             select(User).where(User.telegram_id == telegram_id)
         )
         user = result.scalar_one_or_none()
         if user is None:
-            user = User(telegram_id=telegram_id, name=name)
+            user = User(
+                telegram_id=telegram_id,
+                name=name,
+                plan="trial",
+                trial_ends_at=datetime.now() + timedelta(days=trial_days),
+                is_active=True,
+            )
             session.add(user)
             await session.flush()
             await session.refresh(user)
-            logger.info(f"Novo usuário criado: {telegram_id} ({name})")
+            logger.info(f"Novo usuário criado via get_or_create: {telegram_id} ({name})")
         return user
 
 
@@ -56,6 +117,159 @@ async def get_all_active_users() -> list[User]:
     async with async_session() as session:
         result = await session.execute(select(User).where(User.is_active == True))
         return list(result.scalars().all())
+
+
+async def activate_plan(
+    user_id: int,
+    plan: str,
+    subscription_ends_at: Optional[datetime] = None,
+) -> Optional[User]:
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user:
+            user.plan = plan
+            user.is_active = True
+            user.subscription_ends_at = subscription_ends_at
+            if plan == "lifetime":
+                user.subscription_ends_at = None
+        return user
+
+
+async def update_google_tokens(
+    user_id: int,
+    access_token: str,
+    refresh_token: Optional[str],
+    token_expiry: Optional[datetime],
+) -> None:
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user:
+            user.google_access_token = access_token
+            if refresh_token:
+                user.google_refresh_token = refresh_token
+            user.google_token_expiry = token_expiry
+
+
+async def deactivate_user(user_id: int) -> None:
+    async with async_session() as session:
+        result = await session.execute(select(User).where(User.id == user_id))
+        user = result.scalar_one_or_none()
+        if user:
+            user.is_active = False
+
+
+async def get_expired_trials() -> list[User]:
+    """Usuários em trial que expiraram mas ainda estão ativos."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(
+                and_(
+                    User.plan == "trial",
+                    User.is_active == True,
+                    User.trial_ends_at <= datetime.now(),
+                )
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def get_expired_subscriptions() -> list[User]:
+    """Usuários mensais com assinatura expirada mas ainda ativos."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(
+                and_(
+                    User.plan == "monthly",
+                    User.is_active == True,
+                    User.subscription_ends_at <= datetime.now(),
+                )
+            )
+        )
+        return list(result.scalars().all())
+
+
+async def get_expiring_soon(days: int = 3) -> list[User]:
+    """Usuários mensais cuja assinatura vence nos próximos X dias."""
+    now = datetime.now()
+    deadline = now + timedelta(days=days)
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(
+                and_(
+                    User.plan == "monthly",
+                    User.is_active == True,
+                    User.subscription_ends_at >= now,
+                    User.subscription_ends_at <= deadline,
+                )
+            )
+        )
+        return list(result.scalars().all())
+
+
+# ---------------------------------------------------------------------------
+# Coupons
+# ---------------------------------------------------------------------------
+
+async def get_coupon(code: str) -> Optional[Coupon]:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Coupon).where(Coupon.code == code.upper().strip())
+        )
+        return result.scalar_one_or_none()
+
+
+async def use_coupon(coupon_id: int) -> None:
+    async with async_session() as session:
+        result = await session.execute(select(Coupon).where(Coupon.id == coupon_id))
+        coupon = result.scalar_one_or_none()
+        if coupon:
+            coupon.times_used = (coupon.times_used or 0) + 1
+
+
+# ---------------------------------------------------------------------------
+# Payments
+# ---------------------------------------------------------------------------
+
+async def create_payment(
+    user_id: int,
+    mercadopago_payment_id: str,
+    amount: float,
+    status: str,
+    plan: str = "monthly",
+) -> Payment:
+    async with async_session() as session:
+        payment = Payment(
+            user_id=user_id,
+            mercadopago_payment_id=mercadopago_payment_id,
+            amount=amount,
+            status=status,
+            plan=plan,
+        )
+        session.add(payment)
+        await session.flush()
+        await session.refresh(payment)
+        return payment
+
+
+async def get_payment_by_mp_id(mp_payment_id: str) -> Optional[Payment]:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Payment).where(Payment.mercadopago_payment_id == mp_payment_id)
+        )
+        return result.scalar_one_or_none()
+
+
+async def update_payment_status(mp_payment_id: str, status: str) -> Optional[Payment]:
+    async with async_session() as session:
+        result = await session.execute(
+            select(Payment).where(Payment.mercadopago_payment_id == mp_payment_id)
+        )
+        payment = result.scalar_one_or_none()
+        if payment:
+            payment.status = status
+        return payment
 
 
 # ---------------------------------------------------------------------------
@@ -73,8 +287,7 @@ async def create_task(
     due_date: Optional[datetime] = None,
 ) -> Task:
     async with async_session() as session:
-        # Verifica duplicata: título similar (ILIKE) + mesmo dia de vencimento + pendente
-        keyword = title.strip()[:40]  # usa até 40 chars do título como termo de busca
+        keyword = title.strip()[:40]
         dup_conditions = [
             Task.user_id == user_id,
             Task.title.ilike(f"%{keyword}%"),
@@ -84,7 +297,6 @@ async def create_task(
             day_start = due_date.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end = due_date.replace(hour=23, minute=59, second=59, microsecond=999999)
             dup_conditions += [Task.due_date >= day_start, Task.due_date <= day_end]
-        # sem due_date: checar só por título + status, sem filtro de data
 
         dup_result = await session.execute(select(Task).where(and_(*dup_conditions)))
         existing = dup_result.scalars().first()
@@ -178,16 +390,11 @@ async def find_schedule_conflicts(
     dt: datetime,
     window_minutes: int = 30,
 ) -> list[dict]:
-    """
-    Retorna conflitos de agenda em meetings e tasks no intervalo dt ±window_minutes.
-    Cada item: {"type": "reuniao"|"tarefa", "title": ..., "datetime": ...}
-    """
     dt_min = dt - timedelta(minutes=window_minutes)
     dt_max = dt + timedelta(minutes=window_minutes)
     conflicts = []
 
     async with async_session() as session:
-        # Reuniões agendadas no intervalo
         m_result = await session.execute(
             select(Meeting).where(
                 and_(
@@ -205,7 +412,6 @@ async def find_schedule_conflicts(
                 "datetime": m.datetime_start.strftime("%d/%m/%Y às %H:%M"),
             })
 
-        # Tarefas pendentes com due_date no intervalo (e com hora definida, não meia-noite)
         t_result = await session.execute(
             select(Task).where(
                 and_(
@@ -242,7 +448,6 @@ async def create_meeting(
     google_event_id: Optional[str] = None,
 ) -> Meeting:
     async with async_session() as session:
-        # Verifica duplicata: mesmo usuário, horário ±30 min, status agendada
         dup_result = await session.execute(
             select(Meeting).where(
                 and_(
@@ -321,7 +526,6 @@ async def get_meeting(
 
 
 async def get_meeting_by_google_event_id(google_event_id: str) -> Optional[Meeting]:
-    """Busca reunião no banco pelo google_event_id. Útil para sincronizar cancelamentos do GCal."""
     async with async_session() as session:
         result = await session.execute(
             select(Meeting).where(
@@ -341,7 +545,6 @@ async def cancel_meeting(meeting_id: int) -> Optional[Meeting]:
 
 
 async def complete_past_meetings() -> int:
-    """Marca como 'concluida' todas as reuniões agendadas com datetime_start anterior a hoje. Retorna quantidade alterada."""
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     async with async_session() as session:
         result = await session.execute(
@@ -357,7 +560,6 @@ async def complete_past_meetings() -> int:
 
 
 async def deactivate_reminders_by_task(task_id: int) -> int:
-    """Desativa todos os lembretes vinculados a uma tarefa. Retorna a quantidade desativada."""
     async with async_session() as session:
         result = await session.execute(
             select(Reminder).where(
@@ -371,7 +573,6 @@ async def deactivate_reminders_by_task(task_id: int) -> int:
 
 
 async def deactivate_reminders_by_meeting(meeting_id: int) -> int:
-    """Desativa todos os lembretes vinculados a uma reunião. Retorna a quantidade desativada."""
     async with async_session() as session:
         result = await session.execute(
             select(Reminder).where(
@@ -399,7 +600,6 @@ async def create_reminder(
     reminder_type: str = "personalizado",
 ) -> Reminder:
     async with async_session() as session:
-        # Verifica duplicata: mensagem similar + remind_at ±5 min + ativo
         keyword = message.strip()[:40]
         dup_result = await session.execute(
             select(Reminder).where(
@@ -472,7 +672,6 @@ async def deactivate_reminder(
     reminder_id: Optional[int] = None,
     message_search: Optional[str] = None,
 ) -> list[Reminder]:
-    """Desativa lembretes por ID ou busca parcial na mensagem. Retorna os registros alterados."""
     async with async_session() as session:
         if reminder_id:
             result = await session.execute(
@@ -554,7 +753,6 @@ async def get_history(user_id: int, limit: int = 20) -> list[dict]:
 
     raw = [{"role": m.role, "content": m.content} for m in messages]
 
-    # Garante alternância correta user/assistant; descarta inconsistências
     cleaned: list[dict] = []
     for msg in raw:
         if not cleaned:
@@ -564,9 +762,7 @@ async def get_history(user_id: int, limit: int = 20) -> list[dict]:
             last_role = cleaned[-1]["role"]
             if msg["role"] != last_role:
                 cleaned.append(msg)
-            # duplicata do mesmo role: descarta silenciosamente
 
-    # Garante que a primeira mensagem é sempre "user"
     while cleaned and cleaned[0]["role"] != "user":
         cleaned.pop(0)
 

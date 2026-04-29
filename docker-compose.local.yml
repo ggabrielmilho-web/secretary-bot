@@ -1,0 +1,44 @@
+version: "3.8"
+
+# Compose para testes locais com Docker Desktop (Windows/Mac)
+# Não tem diretivas Swarm (deploy:, overlay, etc.)
+# Uso: docker compose -f docker-compose.local.yml up --build
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: secretarybot-db
+    environment:
+      POSTGRES_DB: secretary_bot_saas
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    ports:
+      - "5433:5432"    # 5433 no host para não conflitar com PG local
+    volumes:
+      - pgdata_local:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: secretarybot-app
+    env_file: .env
+    environment:
+      # Garante que o bot aponta pro serviço "db" do compose
+      DATABASE_URL: postgresql+asyncpg://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@db:5432/secretary_bot_saas
+    ports:
+      - "${WEBHOOK_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    entrypoint: ["sh", "-c", "alembic upgrade head && python -m bot.main"]
+
+volumes:
+  pgdata_local:

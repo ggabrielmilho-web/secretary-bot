@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    BigInteger, Boolean, Column, DateTime, ForeignKey,
+    BigInteger, Boolean, Column, DateTime, Float, ForeignKey,
     Integer, String, Text, func,
 )
 from sqlalchemy.orm import relationship
@@ -14,8 +14,24 @@ class User(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     telegram_id = Column(BigInteger, unique=True, nullable=False, index=True)
     name = Column(String(100), nullable=False)
+    email = Column(String(200), nullable=True)
     timezone = Column(String(50), default="America/Sao_Paulo")
     is_active = Column(Boolean, default=True)
+
+    # Assinatura
+    plan = Column(String(20), default="trial")               # trial, monthly, lifetime
+    trial_ends_at = Column(DateTime, nullable=True)
+    subscription_ends_at = Column(DateTime, nullable=True)
+
+    # Google Calendar OAuth2 (individual)
+    google_access_token = Column(Text, nullable=True)
+    google_refresh_token = Column(Text, nullable=True)
+    google_token_expiry = Column(DateTime, nullable=True)
+
+    # Mercado Pago
+    mercadopago_customer_id = Column(String(200), nullable=True)
+    last_payment_id = Column(String(200), nullable=True)
+
     created_at = Column(DateTime, default=func.now())
 
     tasks = relationship("Task", back_populates="user", lazy="select")
@@ -95,3 +111,32 @@ class ConversationMessage(Base):
     created_at = Column(DateTime, default=func.now())
 
     user = relationship("User", back_populates="messages")
+
+
+class Coupon(Base):
+    __tablename__ = "coupons"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    plan = Column(String(20), nullable=False)             # monthly, lifetime
+    duration_days = Column(Integer, nullable=True)         # null = lifetime
+    max_uses = Column(Integer, default=1)
+    times_used = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=func.now())
+    expires_at = Column(DateTime, nullable=True)
+
+
+class Payment(Base):
+    __tablename__ = "payments"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    mercadopago_payment_id = Column(String(200), nullable=False, unique=True)
+    amount = Column(Float, nullable=False)
+    currency = Column(String(10), default="BRL")
+    status = Column(String(20), nullable=False)           # approved, pending, rejected
+    plan = Column(String(20), default="monthly")
+    created_at = Column(DateTime, default=func.now())
+
+    user = relationship("User")

@@ -18,31 +18,43 @@ _memory = ConversationMemory()
 
 
 def get_agent():
-    # Reconstrói o agente a cada chamada para garantir data/hora sempre atualizada nas instruções
     return build_secretary_agent()
 
 
-async def _run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, message_text: str) -> None:
+async def check_subscription(update: Update) -> tuple[bool, Optional[object]]:
+    """
+    Verifica assinatura do usuário. Retorna (ativo, db_user).
+    Se inativo, envia mensagem de erro e retorna (False, db_user).
+    """
+    user = update.effective_user
+    db_user = await crud.get_user_by_telegram_id(user.id)
+
+    if not db_user:
+        await update.message.reply_text(
+            "Olá! Use /start para criar sua conta e começar seu período de teste gratuito."
+        )
+        return False, None
+
+    active, error_msg = crud.check_subscription_status(db_user)
+    if not active:
+        await update.message.reply_text(error_msg)
+        return False, db_user
+
+    return True, db_user
+
+
+async def _run_agent(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    message_text: str,
+    db_user,
+) -> None:
     """Executa o fluxo completo do agente com o texto fornecido."""
     user = update.effective_user
 
     await update.message.chat.send_action("typing")
 
-    try:
-        db_user = await crud.get_or_create_user(
-            telegram_id=user.id,
-            name=user.full_name or str(user.id),
-        )
-    except Exception as e:
-        logger.error(f"Erro ao buscar/criar usuário {user.id}: {e}")
-        await update.message.reply_text("Erro interno. Tente novamente em instantes.")
-        return
-
-    user_email: Optional[str] = settings.USER_EMAIL_MAP.get(user.id)
-    if not user_email:
-        logger.warning(f"Usuário {user.id} sem email mapeado — Google Calendar desabilitado.")
-
-    history = await _memory.get_history(user.id)
+    history = await _memory.get_history(db_user.id)
     input_messages = [*history, {"role": "user", "content": message_text}]
 
     logger.info(f"Executando agente para {user.id} — histórico: {len(history)} msgs")
@@ -53,7 +65,7 @@ async def _run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, message
             context={
                 "user_id": db_user.id,
                 "telegram_id": user.id,
-                "user_email": user_email,
+                "db_user": db_user,
             },
         )
         logger.info(f"Agente respondeu para {user.id}")
@@ -61,7 +73,9 @@ async def _run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, message
 
     except InputGuardrailTripwireTriggered:
         logger.warning(f"Guardrail acionado para telegram_id={user.id}")
-        await update.message.reply_text("Desculpe, você não tem autorização para usar este bot.")
+        await update.message.reply_text(
+            "⏰ Seu acesso expirou. Use /planos para assinar e continuar."
+        )
         return
 
     except Exception as e:
@@ -69,8 +83,8 @@ async def _run_agent(update: Update, context: ContextTypes.DEFAULT_TYPE, message
         await update.message.reply_text("Ocorreu um erro ao processar sua mensagem. Tente novamente em instantes.")
         return
 
-    await _memory.save_message(user.id, "user", message_text)
-    await _memory.save_message(user.id, "assistant", response_text)
+    await _memory.save_message(db_user.id, "user", message_text)
+    await _memory.save_message(db_user.id, "assistant", response_text)
 
     try:
         await update.message.reply_text(response_text, parse_mode="Markdown")
@@ -123,11 +137,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     logger.info(f"Mensagem recebida de {user.id} ({user.full_name}): {message_text[:60]}")
 
-    if user.id not in settings.AUTHORIZED_USERS:
-        await update.message.reply_text("Desculpe, você não tem autorização para usar este bot.")
+    active, db_user = await check_subscription(update)
+    if not active:
         return
 
-    await _run_agent(update, context, message_text)
+    await _run_agent(update, context, message_text, db_user)
 
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -137,8 +151,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user:
         return
 
-    if user.id not in settings.AUTHORIZED_USERS:
-        await update.message.reply_text("Desculpe, você não tem autorização para usar este bot.")
+    active, db_user = await check_subscription(update)
+    if not active:
         return
 
     await update.message.chat.send_action("typing")
@@ -148,4 +162,4 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.message.reply_text("Não consegui transcrever o áudio. Tente novamente ou envie como texto.")
         return
 
-    await _run_agent(update, context, text)
+    await _run_agent(update, context, text, db_user)

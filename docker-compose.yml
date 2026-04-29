@@ -1,0 +1,35 @@
+version: "3.8"
+
+# Deploy via: docker stack deploy -c docker-compose.yml secretarybot
+# O PostgreSQL já existe no servidor na rede carvalhonet
+
+services:
+  bot:
+    image: secretary-bot-saas:latest
+    env_file: .env
+    ports:
+      - "8089:8080"    # porta 8089 no host para não conflitar com outros serviços
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+        delay: 10s
+      resources:
+        limits:
+          memory: 512M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+    networks:
+      - carvalhonet
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  carvalhonet:
+    external: true    # rede já existe no servidor

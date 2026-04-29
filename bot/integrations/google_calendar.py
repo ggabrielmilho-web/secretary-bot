@@ -1,262 +1,379 @@
 import asyncio
 import logging
-import uuid
-from datetime import datetime, timedelta
-from typing import Optional
-from zoneinfo import ZoneInfo
+from datetime import datetime
+from typing import Optional, TYPE_CHECKING
+
+from bot.config import settings
+
+if TYPE_CHECKING:
+    from bot.database.models import User
 
 logger = logging.getLogger(__name__)
 
-SCOPES = [
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/calendar.events",
-]
+SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
-TZ_SP = ZoneInfo("America/Sao_Paulo")
+_GOOGLE_AUTH_URI = "https://accounts.google.com/o/oauth2/v2/auth"
+_GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
 
 
-class GoogleCalendarClient:
-    """Cliente Google Calendar com Domain-Wide Delegation.
+def get_auth_url(state: str) -> str:
+    """Gera URL de autorização OAuth2 para o usuário conectar o Google Calendar."""
+    try:
+        from google_auth_oauthlib.flow import Flow
 
-    Usa uma Service Account para acessar agendas dos diretores
-    sem necessidade de OAuth individual.
-    """
+        client_config = {
+            "web": {
+                "client_id": settings.GOOGLE_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                "redirect_uris": [settings.GOOGLE_REDIRECT_URI],
+                "auth_uri": _GOOGLE_AUTH_URI,
+                "token_uri": _GOOGLE_TOKEN_URI,
+            }
+        }
+        flow = Flow.from_client_config(client_config, scopes=SCOPES, state=state)
+        flow.redirect_uri = settings.GOOGLE_REDIRECT_URI
+        url, _ = flow.authorization_url(access_type="offline", prompt="consent")
+        return url
+    except Exception as e:
+        logger.error(f"Erro ao gerar URL OAuth2: {e}")
+        raise
 
-    def __init__(self, service_account_file: str) -> None:
-        self._service_account_file = service_account_file
-        self._base_credentials = None
-        self._load_credentials()
 
-    def _load_credentials(self) -> None:
+async def exchange_code(code: str, state: str) -> dict:
+    """Troca código de autorização por access_token + refresh_token."""
+    try:
+        from google_auth_oauthlib.flow import Flow
+
+        client_config = {
+            "web": {
+                "client_id": settings.GOOGLE_CLIENT_ID,
+                "client_secret": settings.GOOGLE_CLIENT_SECRET,
+                "redirect_uris": [settings.GOOGLE_REDIRECT_URI],
+                "auth_uri": _GOOGLE_AUTH_URI,
+                "token_uri": _GOOGLE_TOKEN_URI,
+            }
+        }
+        flow = Flow.from_client_config(client_config, scopes=SCOPES, state=state)
+        flow.redirect_uri = settings.GOOGLE_REDIRECT_URI
+
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: flow.fetch_token(code=code),
+        )
+        creds = flow.credentials
+        return {
+            "access_token": creds.token,
+            "refresh_token": creds.refresh_token,
+            "token_expiry": creds.expiry,
+        }
+    except Exception as e:
+        logger.error(f"Erro ao trocar código OAuth2: {e}")
+        raise
+
+
+def _build_credentials(user: "User"):
+    """Constrói objeto Credentials a partir dos tokens do usuário no banco."""
+    from google.oauth2.credentials import Credentials
+
+    return Credentials(
+        token=user.google_access_token,
+        refresh_token=user.google_refresh_token,
+        token_uri=_GOOGLE_TOKEN_URI,
+        client_id=settings.GOOGLE_CLIENT_ID,
+        client_secret=settings.GOOGLE_CLIENT_SECRET,
+        scopes=SCOPES,
+    )
+
+
+def _refresh_if_expired_sync(creds) -> tuple:
+    """Renova o token se expirado. Retorna (creds, renewed: bool)."""
+    try:
+        from google.auth.transport.requests import Request
+
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            return creds, True
+        return creds, False
+    except Exception as e:
+        logger.warning(f"Falha ao renovar token Google: {e}")
+        return creds, False
+
+
+def _build_service_sync(user: "User"):
+    """Constrói serviço Google Calendar. Retorna (service, creds, renewed)."""
+    from googleapiclient.discovery import build
+
+    creds = _build_credentials(user)
+    creds, renewed = _refresh_if_expired_sync(creds)
+    service = build("calendar", "v3", credentials=creds)
+    return service, creds, renewed
+
+
+def is_available() -> bool:
+    """Retorna True se as credenciais OAuth2 estão configuradas."""
+    return bool(settings.GOOGLE_CLIENT_ID and settings.GOOGLE_CLIENT_SECRET)
+
+
+def user_has_calendar(user: "User") -> bool:
+    """Retorna True se o usuário tem tokens OAuth2 salvos."""
+    return bool(user and user.google_access_token)
+
+
+# ---------------------------------------------------------------------------
+# Calendar operations
+# ---------------------------------------------------------------------------
+
+async def list_events(user: "User", time_min: datetime, time_max: datetime) -> list[dict]:
+    """Lista eventos do Google Calendar do usuário no intervalo informado."""
+    if not user_has_calendar(user):
+        return []
+
+    def _sync():
         try:
-            from google.oauth2 import service_account
-            self._base_credentials = service_account.Credentials.from_service_account_file(
-                self._service_account_file, scopes=SCOPES
-            )
-            logger.info("Credenciais do Google Calendar carregadas com sucesso.")
-        except FileNotFoundError:
-            logger.warning(
-                f"Arquivo de service account não encontrado: {self._service_account_file}. "
-                "Integração Google Calendar desabilitada."
-            )
-        except Exception as e:
-            logger.warning(f"Erro ao carregar credenciais Google: {e}. Integração desabilitada.")
-
-    @property
-    def available(self) -> bool:
-        return self._base_credentials is not None
-
-    def _get_service(self, user_email: str):
-        from googleapiclient.discovery import build
-        delegated = self._base_credentials.with_subject(user_email)
-        return build("calendar", "v3", credentials=delegated)
-
-    def _list_events_sync(self, user_email: str, time_min: datetime, time_max: datetime) -> list[dict]:
-        if time_min.tzinfo is None:
-            time_min = time_min.replace(tzinfo=TZ_SP)
-        if time_max.tzinfo is None:
-            time_max = time_max.replace(tzinfo=TZ_SP)
-        service = self._get_service(user_email)
-        events_result = (
-            service.events()
-            .list(
+            service, creds, renewed = _build_service_sync(user)
+            events_result = service.events().list(
                 calendarId="primary",
-                timeMin=time_min.isoformat(),
-                timeMax=time_max.isoformat(),
+                timeMin=time_min.isoformat() + "Z",
+                timeMax=time_max.isoformat() + "Z",
                 singleEvents=True,
                 orderBy="startTime",
-                timeZone="America/Sao_Paulo",
-            )
-            .execute()
+            ).execute()
+            return events_result.get("items", []), creds if renewed else None
+        except Exception as e:
+            logger.error(f"Erro ao listar eventos GCal (user {user.id}): {e}")
+            return [], None
+
+    loop = asyncio.get_event_loop()
+    raw_events, new_creds = await loop.run_in_executor(None, _sync)
+
+    if new_creds:
+        from bot.database import crud
+        await crud.update_google_tokens(
+            user.id,
+            new_creds.token,
+            new_creds.refresh_token,
+            new_creds.expiry,
         )
-        events = events_result.get("items", [])
-        return [
-            {
-                "google_event_id": ev["id"],
-                "title": ev.get("summary", "Sem título"),
-                "datetime_start": ev["start"].get("dateTime", ev["start"].get("date")),
-                "datetime_end": ev["end"].get("dateTime", ev["end"].get("date")),
-                "location": ev.get("location", ""),
-                "description": ev.get("description", ""),
-                "organizer": ev.get("organizer", {}).get("email", ""),
-                "status": ev.get("status", ""),
-                "attendees": [
-                    {
-                        "email": a.get("email"),
-                        "name": a.get("displayName", ""),
-                        "response": a.get("responseStatus", ""),
-                    }
-                    for a in ev.get("attendees", [])
-                ],
-                "meet_link": ev.get("hangoutLink", ""),
-                "source": "google_calendar",
-            }
-            for ev in events
+
+    result = []
+    for ev in raw_events:
+        start = ev.get("start", {})
+        dt_start = start.get("dateTime") or start.get("date", "")
+
+        meet_link = ""
+        for ep in ev.get("conferenceData", {}).get("entryPoints", []):
+            if ep.get("entryPointType") == "video":
+                meet_link = ep.get("uri", "")
+                break
+
+        attendees = [
+            {"email": a.get("email", ""), "name": a.get("displayName", "")}
+            for a in ev.get("attendees", [])
         ]
 
-    def _create_event_sync(
-        self,
-        user_email: str,
-        title: str,
-        datetime_start: datetime,
-        duration_minutes: int,
-        location: Optional[str],
-        description: Optional[str],
-        attendees: Optional[list[str]],
-        create_meet_link: bool = False,
-    ) -> dict:
-        service = self._get_service(user_email)
-        end_dt = datetime_start + timedelta(minutes=duration_minutes)
-        body: dict = {
-            "summary": title,
-            "start": {"dateTime": datetime_start.isoformat(), "timeZone": "America/Sao_Paulo"},
-            "end": {"dateTime": end_dt.isoformat(), "timeZone": "America/Sao_Paulo"},
-        }
-        if location:
-            body["location"] = location
-        if description:
-            body["description"] = description
-        if attendees:
-            body["attendees"] = [{"email": e} for e in attendees]
-
-        conference_version = 0
-        if create_meet_link:
-            body["conferenceData"] = {
-                "createRequest": {
-                    "requestId": uuid.uuid4().hex,
-                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
-                }
-            }
-            conference_version = 1
-
-        event = service.events().insert(
-            calendarId="primary",
-            body=body,
-            conferenceDataVersion=conference_version,
-        ).execute()
-        meet_link = event.get("hangoutLink", "")
-        logger.info(f"Evento criado no Google Calendar: {event['id']} — {title} | Meet: {meet_link}")
-        return {
-            "google_event_id": event["id"],
-            "link": event.get("htmlLink", ""),
+        result.append({
+            "id": ev.get("id"),
+            "title": ev.get("summary", "(sem título)"),
+            "datetime_start": dt_start,
+            "datetime_end": (ev.get("end", {}).get("dateTime") or ev.get("end", {}).get("date", "")),
+            "location": ev.get("location", ""),
+            "description": ev.get("description", ""),
+            "organizer_email": ev.get("organizer", {}).get("email", ""),
+            "attendees": attendees,
             "meet_link": meet_link,
+            "status": ev.get("status", "confirmed"),
+        })
+
+    return result
+
+
+async def create_event(
+    user: "User",
+    title: str,
+    datetime_start: datetime,
+    duration_minutes: int = 60,
+    location: Optional[str] = None,
+    description: Optional[str] = None,
+    attendees: Optional[list] = None,
+    create_meet_link: bool = False,
+) -> dict:
+    """Cria evento no Google Calendar. Retorna {google_event_id, event_link, meet_link}."""
+    if not user_has_calendar(user):
+        return {"google_event_id": None, "event_link": None, "meet_link": None}
+
+    from datetime import timedelta
+    import uuid
+
+    end_dt = datetime_start + timedelta(minutes=duration_minutes)
+
+    event_body: dict = {
+        "summary": title,
+        "start": {"dateTime": datetime_start.isoformat(), "timeZone": settings.TIMEZONE},
+        "end": {"dateTime": end_dt.isoformat(), "timeZone": settings.TIMEZONE},
+    }
+    if location:
+        event_body["location"] = location
+    if description:
+        event_body["description"] = description
+    if attendees:
+        event_body["attendees"] = [
+            {"email": a} if isinstance(a, str) else a
+            for a in attendees
+        ]
+    if create_meet_link:
+        event_body["conferenceData"] = {
+            "createRequest": {
+                "requestId": str(uuid.uuid4()),
+                "conferenceSolutionKey": {"type": "hangoutsMeet"},
+            }
         }
 
-    def _delete_event_sync(self, user_email: str, event_id: str, max_retries: int = 2) -> bool:
-        import time
-        service = self._get_service(user_email)
+    def _sync():
+        try:
+            service, creds, renewed = _build_service_sync(user)
+            kwargs = {"calendarId": "primary", "body": event_body, "sendUpdates": "all"}
+            if create_meet_link:
+                kwargs["conferenceDataVersion"] = 1
+            created = service.events().insert(**kwargs).execute()
+
+            meet_link = ""
+            for ep in created.get("conferenceData", {}).get("entryPoints", []):
+                if ep.get("entryPointType") == "video":
+                    meet_link = ep.get("uri", "")
+                    break
+
+            return {
+                "google_event_id": created.get("id"),
+                "event_link": created.get("htmlLink"),
+                "meet_link": meet_link,
+            }, creds if renewed else None
+        except Exception as e:
+            logger.error(f"Erro ao criar evento GCal (user {user.id}): {e}")
+            return {"google_event_id": None, "event_link": None, "meet_link": None}, None
+
+    loop = asyncio.get_event_loop()
+    result, new_creds = await loop.run_in_executor(None, _sync)
+
+    if new_creds:
+        from bot.database import crud
+        await crud.update_google_tokens(user.id, new_creds.token, new_creds.refresh_token, new_creds.expiry)
+
+    return result
+
+
+async def delete_event(user: "User", google_event_id: str) -> bool:
+    """Remove evento do Google Calendar. Retorna True se sucesso."""
+    if not user_has_calendar(user):
+        return False
+
+    def _sync():
+        import time as _time
+        max_retries = 2
         for attempt in range(max_retries + 1):
             try:
-                service.events().delete(calendarId="primary", eventId=event_id).execute()
-                logger.info(f"Evento removido do Google Calendar: {event_id}")
-                return True
+                service, creds, renewed = _build_service_sync(user)
+                service.events().delete(
+                    calendarId="primary",
+                    eventId=google_event_id,
+                    sendUpdates="all",
+                ).execute()
+                return True, creds if renewed else None
             except Exception as e:
                 if attempt < max_retries:
-                    logger.warning(f"Falha ao deletar {event_id} (tentativa {attempt+1}/{max_retries+1}): {e}. Tentando novamente...")
-                    time.sleep(2)
+                    _time.sleep(2)
                 else:
-                    raise
+                    logger.error(f"Erro ao deletar evento GCal {google_event_id}: {e}")
+                    return False, None
+        return False, None
 
-    def _respond_to_invite_sync(self, user_email: str, event_id: str, response: str) -> bool:
-        service = self._get_service(user_email)
-        event = service.events().get(calendarId="primary", eventId=event_id).execute()
-        for attendee in event.get("attendees", []):
-            if attendee.get("email") == user_email:
-                attendee["responseStatus"] = response
-                break
-        service.events().update(calendarId="primary", eventId=event_id, body=event).execute()
-        logger.info(f"Convite {event_id} respondido: {response}")
-        return True
+    loop = asyncio.get_event_loop()
+    success, new_creds = await loop.run_in_executor(None, _sync)
 
-    # ------------------------------------------------------------------
-    # Async wrappers (evita bloquear o event loop do bot)
-    # ------------------------------------------------------------------
+    if new_creds:
+        from bot.database import crud
+        await crud.update_google_tokens(user.id, new_creds.token, new_creds.refresh_token, new_creds.expiry)
 
-    async def list_events(
-        self, user_email: str, time_min: datetime, time_max: datetime
-    ) -> list[dict]:
-        if not self.available:
-            return []
+    return success
+
+
+async def list_pending_invites(user: "User") -> list[dict]:
+    """Lista convites pendentes (needsAction) nos próximos 30 dias."""
+    if not user_has_calendar(user):
+        return []
+
+    from datetime import timedelta
+    now = datetime.utcnow()
+    time_max = now + timedelta(days=30)
+
+    def _sync():
         try:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None, self._list_events_sync, user_email, time_min, time_max
-            )
+            service, creds, renewed = _build_service_sync(user)
+            events_result = service.events().list(
+                calendarId="primary",
+                timeMin=now.isoformat() + "Z",
+                timeMax=time_max.isoformat() + "Z",
+                singleEvents=True,
+                orderBy="startTime",
+            ).execute()
+            items = events_result.get("items", [])
+            pending = []
+            for ev in items:
+                for att in ev.get("attendees", []):
+                    if att.get("self") and att.get("responseStatus") == "needsAction":
+                        start = ev.get("start", {})
+                        dt_start = start.get("dateTime") or start.get("date", "")
+                        pending.append({
+                            "id": ev.get("id"),
+                            "title": ev.get("summary", "(sem título)"),
+                            "datetime_start": dt_start,
+                            "organizer_email": ev.get("organizer", {}).get("email", ""),
+                        })
+                        break
+            return pending, creds if renewed else None
         except Exception as e:
-            logger.error(f"Erro ao listar eventos do Google Calendar para {user_email}: {e}")
-            return []
+            logger.error(f"Erro ao listar convites pendentes (user {user.id}): {e}")
+            return [], None
 
-    async def create_event(
-        self,
-        user_email: str,
-        title: str,
-        datetime_start: datetime,
-        duration_minutes: int = 60,
-        location: Optional[str] = None,
-        description: Optional[str] = None,
-        attendees: Optional[list[str]] = None,
-        create_meet_link: bool = False,
-    ) -> Optional[dict]:
-        if not self.available:
-            return None
+    loop = asyncio.get_event_loop()
+    result, new_creds = await loop.run_in_executor(None, _sync)
+
+    if new_creds:
+        from bot.database import crud
+        await crud.update_google_tokens(user.id, new_creds.token, new_creds.refresh_token, new_creds.expiry)
+
+    return result
+
+
+async def respond_to_invite(user: "User", event_id: str, response: str) -> bool:
+    """Aceita ou recusa convite. response: 'accepted' ou 'declined'."""
+    if not user_has_calendar(user):
+        return False
+
+    def _sync():
         try:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None,
-                self._create_event_sync,
-                user_email,
-                title,
-                datetime_start,
-                duration_minutes,
-                location,
-                description,
-                attendees,
-                create_meet_link,
-            )
-        except Exception as e:
-            logger.error(f"[GCAL] Falha ao criar evento para {user_email}: {type(e).__name__}: {e}")
-            return None
-
-    async def delete_event(self, user_email: str, event_id: str) -> bool:
-        if not self.available:
-            return False
-        try:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(None, self._delete_event_sync, user_email, event_id)
-        except Exception as e:
-            logger.error(f"Erro ao remover evento {event_id} do Google Calendar: {e}")
-            return False
-
-    async def list_pending_invites(self, user_email: str) -> list[dict]:
-        now = datetime.now(TZ_SP)
-        future = now + timedelta(days=30)
-        all_events = await self.list_events(user_email, now, future)
-        pending = []
-        for ev in all_events:
-            for att in ev.get("attendees", []):
-                if att.get("email") == user_email and att.get("response") == "needsAction":
-                    pending.append(ev)
+            service, creds, renewed = _build_service_sync(user)
+            event = service.events().get(calendarId="primary", eventId=event_id).execute()
+            for att in event.get("attendees", []):
+                if att.get("self"):
+                    att["responseStatus"] = response
                     break
-        return pending
-
-    async def respond_to_invite(self, user_email: str, event_id: str, response: str) -> bool:
-        if not self.available:
-            return False
-        try:
-            loop = asyncio.get_event_loop()
-            return await loop.run_in_executor(
-                None, self._respond_to_invite_sync, user_email, event_id, response
-            )
+            service.events().patch(
+                calendarId="primary",
+                eventId=event_id,
+                body={"attendees": event.get("attendees", [])},
+                sendUpdates="all",
+            ).execute()
+            return True, creds if renewed else None
         except Exception as e:
             logger.error(f"Erro ao responder convite {event_id}: {e}")
-            return False
+            return False, None
 
+    loop = asyncio.get_event_loop()
+    success, new_creds = await loop.run_in_executor(None, _sync)
 
-# Instância global — inicializada no main.py
-google_calendar: GoogleCalendarClient = None  # type: ignore
+    if new_creds:
+        from bot.database import crud
+        await crud.update_google_tokens(user.id, new_creds.token, new_creds.refresh_token, new_creds.expiry)
 
-
-def init_google_calendar(service_account_file: str) -> GoogleCalendarClient:
-    global google_calendar
-    google_calendar = GoogleCalendarClient(service_account_file)
-    return google_calendar
+    return success
