@@ -12,7 +12,8 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    telegram_id = Column(BigInteger, unique=True, nullable=False, index=True)
+    telegram_id = Column(BigInteger, unique=True, nullable=True, index=True)
+    whatsapp_number = Column(String(30), unique=True, nullable=True, index=True)
     name = Column(String(100), nullable=False)
     timezone = Column(String(50), default="America/Sao_Paulo")
     is_active = Column(Boolean, default=True)

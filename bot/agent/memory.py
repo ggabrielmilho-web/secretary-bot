@@ -21,6 +21,14 @@ class ConversationMemory:
             logger.error(f"Erro ao carregar histórico do usuário {telegram_id}: {e}")
             return []
 
+    async def get_history_by_user_id(self, user_id: int, limit: int = 20) -> list[dict]:
+        """Retorna histórico diretamente por user_id do banco (usado pelo WhatsApp)."""
+        try:
+            return await crud.get_history(user_id=user_id, limit=limit)
+        except Exception as e:
+            logger.error(f"Erro ao carregar histórico do user_id {user_id}: {e}")
+            return []
+
     async def save_message(self, telegram_id: int, role: str, content: str) -> None:
         """Salva mensagem (role='user' ou role='assistant') no histórico."""
         try:

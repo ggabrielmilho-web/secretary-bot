@@ -30,6 +30,22 @@ class Settings:
         "credentials/google-service-account.json",
     )
 
+    # Telegram (pode ser desativado)
+    TELEGRAM_ENABLED: bool = os.getenv("TELEGRAM_ENABLED", "true").lower() == "true"
+
+    # WhatsApp via UazAPI
+    UAZAPI_TOKEN: str = os.getenv("UAZAPI_TOKEN", "")
+    UAZAPI_BASE_URL: str = os.getenv("UAZAPI_BASE_URL", "")
+    WEBHOOK_PORT: int = int(os.getenv("WEBHOOK_PORT", "8080"))
+    AUTHORIZED_WHATSAPP: list[str] = [
+        n.strip() for n in os.getenv("AUTHORIZED_WHATSAPP", "").split(",") if n.strip()
+    ]
+    WHATSAPP_EMAIL_MAP: dict[str, str] = {
+        pair.split(":", 1)[0].strip(): pair.split(":", 1)[1].strip()
+        for pair in os.getenv("WHATSAPP_EMAIL_MAP", "").split(",")
+        if ":" in pair
+    }
+
     OPENAI_MODEL: str = "gpt-4.1-mini"
     MAX_CONVERSATION_HISTORY: int = 20
     REMINDER_CHECK_INTERVAL_SECONDS: int = 60

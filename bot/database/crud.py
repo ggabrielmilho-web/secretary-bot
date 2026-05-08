@@ -52,6 +52,21 @@ async def get_or_create_user(telegram_id: int, name: str) -> User:
         return user
 
 
+async def get_or_create_user_by_whatsapp(whatsapp_number: str, name: str) -> User:
+    async with async_session() as session:
+        result = await session.execute(
+            select(User).where(User.whatsapp_number == whatsapp_number)
+        )
+        user = result.scalar_one_or_none()
+        if user is None:
+            user = User(whatsapp_number=whatsapp_number, name=name)
+            session.add(user)
+            await session.flush()
+            await session.refresh(user)
+            logger.info(f"Novo usuário WhatsApp criado: {whatsapp_number} ({name})")
+        return user
+
+
 async def get_all_active_users() -> list[User]:
     async with async_session() as session:
         result = await session.execute(select(User).where(User.is_active == True))
