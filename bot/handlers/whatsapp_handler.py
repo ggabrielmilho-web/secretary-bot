@@ -119,14 +119,14 @@ async def webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         return aiohttp.web.Response(text="ok")
 
     # Processa mensagem de texto
-    if message_type in ("text", "extendedtextmessage"):
-        text = message.get("text", "").strip()
+    if message_type in ("text", "extendedtextmessage", "conversation"):
+        text = (message.get("text") or message.get("content") or "").strip()
         if text:
             import asyncio
             asyncio.create_task(_run_agent_whatsapp(phone, name, text))
 
     # Processa áudio/voz
-    elif message_type in ("audio", "audiomessage", "ptt"):
+    elif message_type in ("audio", "audiomessage", "ptt", "audioptt"):
         if message_id:
             async def process_audio():
                 text = await _transcribe_whatsapp_audio(message_id)
