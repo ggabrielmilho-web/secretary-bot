@@ -94,6 +94,8 @@ async def webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
     except Exception:
         return aiohttp.web.Response(status=400, text="Invalid JSON")
 
+    logger.info(f"[WEBHOOK] Payload recebido: {payload}")
+
     message = payload.get("message", {})
 
     # Ignora mensagens enviadas pelo próprio bot
