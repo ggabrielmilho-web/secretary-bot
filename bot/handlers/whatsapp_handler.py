@@ -66,6 +66,7 @@ async def _run_agent_whatsapp(phone: str, name: str, message_text: str) -> None:
             context={
                 "user_id": db_user.id,
                 "telegram_id": None,
+                "whatsapp_number": phone,
                 "user_email": user_email,
             },
         )

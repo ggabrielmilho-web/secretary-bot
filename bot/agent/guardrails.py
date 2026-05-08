@@ -10,13 +10,17 @@ logger = logging.getLogger(__name__)
 async def authorization_guardrail(
     ctx: RunContextWrapper[dict], agent: Agent, input: object
 ) -> GuardrailFunctionOutput:
-    """Verifica se o usuário tem autorização para usar o bot."""
+    """Verifica se o usuário tem autorização para usar o bot (Telegram ou WhatsApp)."""
     telegram_id = ctx.context.get("telegram_id")
+    whatsapp_number = ctx.context.get("whatsapp_number")
 
-    if telegram_id not in settings.AUTHORIZED_USERS:
-        logger.warning(f"Acesso negado para telegram_id={telegram_id}")
+    telegram_ok = telegram_id is not None and telegram_id in settings.AUTHORIZED_USERS
+    whatsapp_ok = whatsapp_number is not None and whatsapp_number in settings.AUTHORIZED_WHATSAPP
+
+    if not telegram_ok and not whatsapp_ok:
+        logger.warning(f"Acesso negado — telegram_id={telegram_id} whatsapp={whatsapp_number}")
         return GuardrailFunctionOutput(
-            output_info={"reason": "unauthorized", "telegram_id": telegram_id},
+            output_info={"reason": "unauthorized"},
             tripwire_triggered=True,
         )
 
