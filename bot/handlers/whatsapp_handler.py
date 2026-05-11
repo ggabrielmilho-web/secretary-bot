@@ -62,8 +62,8 @@ async def _run_agent_whatsapp_image(phone: str, name: str, image_bytes: bytes, c
     user_message = {
         "role": "user",
         "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            {"type": "text", "text": prompt},
+            {"type": "input_image", "image_url": f"data:image/jpeg;base64,{b64}"},
+            {"type": "input_text", "text": prompt},
         ],
     }
     input_messages = [*history, user_message]
