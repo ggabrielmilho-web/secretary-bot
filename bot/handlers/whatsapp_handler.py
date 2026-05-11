@@ -1,3 +1,4 @@
+import base64
 import io
 import logging
 from typing import Optional
@@ -41,6 +42,59 @@ async def _transcribe_whatsapp_audio(message_id: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Erro ao transcrever áudio WhatsApp: {e}")
         return None
+
+
+async def _run_agent_whatsapp_image(phone: str, name: str, image_bytes: bytes, caption: str) -> None:
+    """Executa o agente com uma imagem (multimodal) e envia a resposta via WhatsApp."""
+    user_email: Optional[str] = settings.WHATSAPP_EMAIL_MAP.get(phone)
+
+    try:
+        db_user = await crud.get_or_create_user_by_whatsapp(whatsapp_number=phone, name=name)
+    except Exception as e:
+        logger.error(f"Erro ao buscar/criar usuário WhatsApp {phone}: {e}")
+        await whatsapp_client.send_text(phone, "Erro interno. Tente novamente.")
+        return
+
+    b64 = base64.b64encode(image_bytes).decode()
+    prompt = caption if caption else "Analise esta imagem. Se contiver informações de evento (data, hora, local), agende automaticamente. Se tiver dúvidas, pergunte antes de criar."
+
+    history = await _memory.get_history_by_user_id(db_user.id)
+    user_message = {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            {"type": "text", "text": prompt},
+        ],
+    }
+    input_messages = [*history, user_message]
+
+    try:
+        result = await Runner.run(
+            get_agent(),
+            input=input_messages,
+            context={
+                "user_id": db_user.id,
+                "telegram_id": None,
+                "whatsapp_number": phone,
+                "user_email": user_email,
+            },
+        )
+        response_text = result.final_output
+    except InputGuardrailTripwireTriggered:
+        await whatsapp_client.send_text(phone, "Desculpe, você não tem autorização para usar este bot.")
+        return
+    except Exception as e:
+        logger.error(f"Erro ao processar imagem WhatsApp para {phone}: {e}")
+        await whatsapp_client.send_text(phone, "Ocorreu um erro ao processar a imagem. Tente novamente.")
+        return
+
+    # Salva no histórico como texto (banco não suporta binário)
+    history_text = f"[imagem enviada]{': ' + caption if caption else ''}"
+    await crud.save_message(db_user.id, "user", history_text)
+    await crud.save_message(db_user.id, "assistant", response_text)
+
+    clean_text = response_text.replace("**", "*").replace("```", "")
+    await whatsapp_client.send_text(phone, clean_text)
 
 
 async def _run_agent_whatsapp(phone: str, name: str, message_text: str) -> None:
@@ -125,6 +179,19 @@ async def webhook_handler(request: aiohttp.web.Request) -> aiohttp.web.Response:
         if text:
             import asyncio
             asyncio.create_task(_run_agent_whatsapp(phone, name, text))
+
+    # Processa imagem
+    elif message_type in ("image", "imagemessage"):
+        caption = (message.get("caption") or message.get("text") or "").strip()
+        if message_id:
+            async def process_image():
+                image_bytes = await whatsapp_client.download_media(message_id)
+                if image_bytes:
+                    await _run_agent_whatsapp_image(phone, name, image_bytes, caption)
+                else:
+                    await whatsapp_client.send_text(phone, "Não consegui baixar a imagem. Tente novamente.")
+            import asyncio
+            asyncio.create_task(process_image())
 
     # Processa áudio/voz
     elif message_type in ("audio", "audiomessage", "ptt", "audioptt"):
