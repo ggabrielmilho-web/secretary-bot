@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from typing import Optional
 from zoneinfo import ZoneInfo
 
@@ -41,6 +41,9 @@ class CriarTarefaInput(BaseModel):
         description="Data de vencimento ISO 8601 (YYYY-MM-DDTHH:MM:SS). Interpretar 'amanhã', 'sexta', etc.",
     )
     force: Optional[bool] = Field(default=False, description="True para criar mesmo com conflito de horário confirmado pelo diretor")
+    is_recurring: Optional[bool] = Field(default=False, description="True quando a tarefa é recorrente (toda semana, todo dia, etc). O lembrete recorrente será criado automaticamente vinculado à tarefa.")
+    recurrence_rule: Optional[str] = Field(default=None, description="Regra de recorrência: 'daily', 'weekdays', 'weekly:mon', 'weekly:fri', 'monthly:15'. Obrigatório quando is_recurring=True.")
+    recurring_time: Optional[str] = Field(default=None, description="Hora do lembrete recorrente no formato HH:MM (ex: '10:00', '19:00'). Obrigatório quando is_recurring=True.")
 
 
 class ListarTarefasInput(BaseModel):
@@ -119,6 +122,7 @@ async def criar_tarefa(ctx: RunContextWrapper[dict], input: CriarTarefaInput) ->
         )
         # Lembrete automático 30 min antes — apenas se due_date tem hora específica
         reminder_created = False
+        reminder_at = None
         if due_date and (due_date.hour != 0 or due_date.minute != 0):
             reminder_at = due_date - timedelta(minutes=30)
             if reminder_at > datetime.now():
@@ -137,6 +141,34 @@ async def criar_tarefa(ctx: RunContextWrapper[dict], input: CriarTarefaInput) ->
                 except Exception as e:
                     logger.warning(f"Não foi possível criar lembrete automático para tarefa {task.id}: {e}")
 
+        # Lembrete recorrente — criado em código para garantir task_id vinculado
+        lembrete_recorrente = None
+        if input.is_recurring and input.recurrence_rule and input.recurring_time:
+            try:
+                from bot.scheduler.reminder_jobs import _next_occurrence
+                hora, minuto = (int(p) for p in input.recurring_time.split(":")[:2])
+                now = datetime.now(TZ_SP).replace(tzinfo=None)
+                # Cria um datetime de referência para hoje com o horário solicitado
+                base_dt = now.replace(hour=hora, minute=minuto, second=0, microsecond=0)
+                # Calcula próxima ocorrência
+                next_dt = _next_occurrence(base_dt, input.recurrence_rule)
+                if next_dt is None:
+                    next_dt = base_dt + timedelta(days=1)
+                await crud.create_reminder(
+                    user_id=user_id,
+                    message=f"Lembrete recorrente: {input.title}",
+                    remind_at=next_dt,
+                    is_recurring=True,
+                    recurrence_rule=input.recurrence_rule,
+                    task_id=task.id,
+                    meeting_id=None,
+                    reminder_type="tarefa",
+                )
+                lembrete_recorrente = f"Lembrete recorrente criado para {next_dt.strftime('%d/%m às %H:%M')} ({input.recurrence_rule})"
+                logger.info(f"Lembrete recorrente criado para tarefa {task.id}: {input.recurrence_rule} às {input.recurring_time}")
+            except Exception as e:
+                logger.warning(f"Não foi possível criar lembrete recorrente para tarefa {task.id}: {e}")
+
         return json.dumps(
             {
                 "success": True,
@@ -145,6 +177,7 @@ async def criar_tarefa(ctx: RunContextWrapper[dict], input: CriarTarefaInput) ->
                 "priority": task.priority,
                 "due_date": task.due_date.isoformat() if task.due_date else None,
                 "lembrete_automatico": f"Lembrete criado para {reminder_at.strftime('%H:%M')} (30 min antes)" if reminder_created else None,
+                "lembrete_recorrente": lembrete_recorrente,
             },
             ensure_ascii=False,
         )
