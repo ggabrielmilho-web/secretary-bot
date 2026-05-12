@@ -30,7 +30,7 @@ class CriarLembreteInput(BaseModel):
         default=None,
         description="Regra de recorrência: 'daily', 'weekdays', 'weekly:mon,wed,fri', 'monthly:15'",
     )
-    task_id: Optional[int] = Field(default=None, description="ID da tarefa vinculada (opcional)")
+    task_id: Optional[int] = Field(default=None, description="ID da tarefa vinculada. OBRIGATÓRIO quando este lembrete for criado para uma tarefa recorrente — use o task_id retornado por criar_tarefa. Deixe None apenas para lembretes avulsos sem vínculo com tarefa.")
     meeting_id: Optional[int] = Field(default=None, description="ID da reunião vinculada (opcional)")
 
 
