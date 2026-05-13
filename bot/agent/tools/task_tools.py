@@ -233,6 +233,9 @@ async def listar_tarefas(ctx: RunContextWrapper[dict], input: ListarTarefasInput
                 "atrasada": atrasada,
                 "dias_atraso": dias_atraso,
                 "description": t.description,
+                "is_recurring": t.is_recurring,
+                "recurrence_rule": t.recurrence_rule,
+                "recurring_time": t.recurring_time,
             })
         return json.dumps({"tasks": items, "total": len(items)}, ensure_ascii=False)
     except Exception as e:

@@ -214,14 +214,20 @@ async def resumo_do_dia(ctx: RunContextWrapper[dict], input: ResumoDoDiaInput) -
     start = base_date.replace(hour=0, minute=0, second=0, microsecond=0)
     end = base_date.replace(hour=23, minute=59, second=59, microsecond=999999)
 
-    # Tarefas pendentes — separadas em atrasadas e normais
+    # Tarefas pendentes — separadas em atrasadas e normais, com filtro de recorrência
     try:
+        from bot.scheduler.reminder_jobs import _should_show_recurring_today
         tasks = await crud.list_tasks(user_id=user_id, status="pendente")
         now_dt = base_date
+        # Filtra tarefas recorrentes: só inclui as que batem com o dia base
+        tasks = [
+            t for t in tasks
+            if not t.is_recurring or _should_show_recurring_today(t.recurrence_rule, base_date)
+        ]
         tasks_atrasadas = []
         tasks_pendentes = []
         for t in tasks:
-            atrasada = t.due_date is not None and t.due_date < now_dt
+            atrasada = t.due_date is not None and t.due_date < now_dt and not t.is_recurring
             dias_atraso = max((now_dt - t.due_date).days, 0) if atrasada else 0
             item = {
                 "task_id": t.id,
@@ -231,6 +237,9 @@ async def resumo_do_dia(ctx: RunContextWrapper[dict], input: ResumoDoDiaInput) -
                 "due_date": t.due_date.isoformat() if t.due_date else None,
                 "atrasada": atrasada,
                 "dias_atraso": dias_atraso,
+                "is_recurring": t.is_recurring,
+                "recurrence_rule": t.recurrence_rule,
+                "recurring_time": t.recurring_time,
             }
             if atrasada:
                 tasks_atrasadas.append(item)
