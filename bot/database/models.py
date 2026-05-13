@@ -36,6 +36,9 @@ class Task(Base):
     status = Column(String(20), default="pendente")     # pendente, em_andamento, concluida, cancelada
     due_date = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+    is_recurring = Column(Boolean, default=False, nullable=False)
+    recurrence_rule = Column(String(50), nullable=True)
+    recurring_time = Column(String(10), nullable=True)
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 

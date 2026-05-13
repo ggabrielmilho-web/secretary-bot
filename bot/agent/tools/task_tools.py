@@ -119,6 +119,9 @@ async def criar_tarefa(ctx: RunContextWrapper[dict], input: CriarTarefaInput) ->
             description=input.description,
             priority=priority,
             due_date=due_date,
+            is_recurring=input.is_recurring or False,
+            recurrence_rule=input.recurrence_rule if input.is_recurring else None,
+            recurring_time=input.recurring_time if input.is_recurring else None,
         )
         # Lembrete automático 30 min antes — apenas se due_date tem hora específica
         reminder_created = False

@@ -15,6 +15,30 @@ TZ_SP = ZoneInfo("America/Sao_Paulo")
 PRIORITY_EMOJI = {"urgente": "🔴", "alta": "🟠", "media": "🟡", "baixa": "🟢"}
 
 
+def _should_show_recurring_today(recurrence_rule: str, today: datetime) -> bool:
+    """Retorna True se uma tarefa recorrente com essa regra deve aparecer no resumo do dia."""
+    if not recurrence_rule:
+        return False
+    rule = recurrence_rule.lower()
+    weekday = today.weekday()  # 0=segunda, 6=domingo
+
+    if rule == "daily":
+        return True
+    if rule == "weekdays":
+        return weekday < 5
+    if rule.startswith("weekly:"):
+        day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+        days = rule.replace("weekly:", "").split(",")
+        target = {day_map[d.strip()] for d in days if d.strip() in day_map}
+        return weekday in target
+    if rule.startswith("monthly:"):
+        try:
+            return today.day == int(rule.replace("monthly:", ""))
+        except ValueError:
+            return False
+    return False
+
+
 def _next_occurrence(remind_at: datetime, recurrence_rule: str) -> datetime | None:
     """Calcula próxima ocorrência de um lembrete recorrente."""
     rule = (recurrence_rule or "").lower()
@@ -140,6 +164,13 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
             # Tarefas pendentes — separar atrasadas das normais
             tasks = await crud.list_tasks(user_id=user.id, status="pendente")
             now_dt = now.replace(tzinfo=None)
+
+            # Filtra tarefas recorrentes: só inclui as que batem com o dia de hoje
+            tasks = [
+                t for t in tasks
+                if not t.is_recurring or _should_show_recurring_today(t.recurrence_rule, now_dt)
+            ]
+
             tasks_atrasadas = [t for t in tasks if t.due_date and t.due_date < now_dt]
             tasks_normais = [t for t in tasks if not (t.due_date and t.due_date < now_dt)]
 
@@ -161,7 +192,9 @@ async def daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
                 msg += f"📋 *Tarefas pendentes ({len(tasks_normais)}):*\n"
                 for t in tasks_normais:
                     emoji = PRIORITY_EMOJI.get(t.priority, "⚪")
-                    msg += f"  {emoji} [{t.priority.upper()}] {t.title}\n"
+                    hora = f" — {t.recurring_time}" if t.is_recurring and t.recurring_time else ""
+                    icone = "🔁" if t.is_recurring else emoji
+                    msg += f"  {icone} [{t.priority.upper()}] {t.title}{hora}\n"
                 msg += "\n"
             elif not tasks_atrasadas:
                 msg += "📋 Nenhuma tarefa pendente ✅\n\n"

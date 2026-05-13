@@ -86,6 +86,9 @@ async def create_task(
     description: Optional[str] = None,
     priority: str = "media",
     due_date: Optional[datetime] = None,
+    is_recurring: bool = False,
+    recurrence_rule: Optional[str] = None,
+    recurring_time: Optional[str] = None,
 ) -> Task:
     async with async_session() as session:
         # Verifica duplicata: título similar (ILIKE) + mesmo dia de vencimento + pendente
@@ -112,6 +115,9 @@ async def create_task(
             description=description,
             priority=priority,
             due_date=due_date,
+            is_recurring=is_recurring,
+            recurrence_rule=recurrence_rule,
+            recurring_time=recurring_time,
         )
         session.add(task)
         await session.flush()

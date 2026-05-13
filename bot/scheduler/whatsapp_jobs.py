@@ -7,7 +7,7 @@ from bot.database import crud
 from bot.integrations.google_calendar import google_calendar as _gcal
 from bot.integrations.whatsapp import whatsapp_client
 from bot.scheduler.reminder_jobs import (
-    PRIORITY_EMOJI, _next_occurrence
+    PRIORITY_EMOJI, _next_occurrence, _should_show_recurring_today
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +92,13 @@ async def daily_summary_whatsapp() -> None:
 
             tasks = await crud.list_tasks(user_id=user.id, status="pendente")
             now_dt = now.replace(tzinfo=None)
+
+            # Filtra tarefas recorrentes: só inclui as que batem com o dia de hoje
+            tasks = [
+                t for t in tasks
+                if not t.is_recurring or _should_show_recurring_today(t.recurrence_rule, now_dt)
+            ]
+
             tasks_atrasadas = [t for t in tasks if t.due_date and t.due_date < now_dt]
             tasks_normais = [t for t in tasks if not (t.due_date and t.due_date < now_dt)]
             reminders = await crud.list_reminders_for_day(user_id=user.id, date=now_dt)
@@ -110,7 +117,9 @@ async def daily_summary_whatsapp() -> None:
                 msg += f"📋 *Tarefas pendentes ({len(tasks_normais)}):*\n"
                 for t in tasks_normais:
                     emoji = PRIORITY_EMOJI.get(t.priority, "⚪")
-                    msg += f"  {emoji} [{t.priority.upper()}] {t.title}\n"
+                    hora = f" — {t.recurring_time}" if t.is_recurring and t.recurring_time else ""
+                    icone = "🔁" if t.is_recurring else emoji
+                    msg += f"  {icone} [{t.priority.upper()}] {t.title}{hora}\n"
                 msg += "\n"
             elif not tasks_atrasadas:
                 msg += "📋 Nenhuma tarefa pendente ✅\n\n"
