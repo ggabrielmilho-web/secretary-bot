@@ -153,22 +153,30 @@ async def criar_tarefa(ctx: RunContextWrapper[dict], input: CriarTarefaInput) ->
                 now = datetime.now(TZ_SP).replace(tzinfo=None)
                 # Cria um datetime de referência para hoje com o horário solicitado
                 base_dt = now.replace(hour=hora, minute=minuto, second=0, microsecond=0)
-                # Calcula próxima ocorrência
+                # Calcula próxima ocorrência da tarefa
                 next_dt = _next_occurrence(base_dt, input.recurrence_rule)
                 if next_dt is None:
                     next_dt = base_dt + timedelta(days=1)
+                # Lembrete dispara 30 min antes do horário da tarefa
+                reminder_at = next_dt - timedelta(minutes=30)
+                # Se ficar no passado, pula para a próxima ocorrência
+                if reminder_at < datetime.now():
+                    next_dt2 = _next_occurrence(next_dt, input.recurrence_rule)
+                    if next_dt2:
+                        reminder_at = next_dt2 - timedelta(minutes=30)
+                        next_dt = next_dt2
                 await crud.create_reminder(
                     user_id=user_id,
-                    message=f"Lembrete recorrente: {input.title}",
-                    remind_at=next_dt,
+                    message=f"Tarefa em 30 minutos: {input.title}",
+                    remind_at=reminder_at,
                     is_recurring=True,
                     recurrence_rule=input.recurrence_rule,
                     task_id=task.id,
                     meeting_id=None,
                     reminder_type="tarefa",
                 )
-                lembrete_recorrente = f"Lembrete recorrente criado para {next_dt.strftime('%d/%m às %H:%M')} ({input.recurrence_rule})"
-                logger.info(f"Lembrete recorrente criado para tarefa {task.id}: {input.recurrence_rule} às {input.recurring_time}")
+                lembrete_recorrente = f"Lembrete criado para {reminder_at.strftime('%d/%m às %H:%M')} (30 min antes — {input.recurrence_rule})"
+                logger.info(f"Lembrete recorrente criado para tarefa {task.id}: {input.recurrence_rule} às {reminder_at.strftime('%H:%M')}")
             except Exception as e:
                 logger.warning(f"Não foi possível criar lembrete recorrente para tarefa {task.id}: {e}")
 
